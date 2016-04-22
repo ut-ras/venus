@@ -1,7 +1,8 @@
 
 import argparse
-import numpy as np
 import collections
+import numpy as np
+import warnings
 
 import rounds as round_solver
 
@@ -18,4 +19,5 @@ def main():
 
 
 if __name__ == '__main__':
+    warnings.filterwarnings("ignore")
     main()

@@ -13,82 +13,93 @@
 # Outputs:
 #       - set(([(x, y, can number)], [(color, can number)]))
 
-from neighbor import Index
 import random
 import argparse
 import numpy as np
-import math
+from scipy import spatial
+from sklearn.cluster import MiniBatchKMeans
+import pdb
+
+def redistribute_clusters(clusters, centers, cluster_size):
+    odd_size = sum([len(c) for c in clusters]) % cluster_size
+
+    by_size = np.argsort(np.array([len(c) for c in clusters]))
+
+    def donation_candidates(from_idx, centers, count=1):
+        clus = np.array(list(clusters[from_idx]))
+        tree = spatial.KDTree(centers)
+        dists, target = tree.query(clus)
+        by_dist = np.argsort(dists)
+        return zip(clus[by_dist], target[by_dist])
+
+    # Form the smallest cluster by giving away pixels from it
+    mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
+    smallest = by_size[0]
+    mask[smallest] = True
+    centers = np.ma.masked_array(centers, mask)
+    to_donate = donation_candidates(smallest, centers)
+    for _ in range(len(clusters[smallest]) - odd_size):
+        pt, tar = next(to_donate)
+        clusters[tar].add(tuple(pt))
+        clusters[smallest].remove(tuple(pt))
+
+    # TODO: once a pixel has been donated, never donate it again.
+    # But we have to be very careful not to donate a pixel to a cluster which
+    # already has 100 donated pixels.
+    it = 0
+    mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
+    mask[smallest] = True
+    while not all(len(c) <= cluster_size for c in clusters):
+        by_size = np.argsort(np.array([len(c) for c in clusters]))
+
+        print(it, by_size[-1], len(clusters[by_size[-1]]), sep="\t")
+        it += 1
+
+        largest = by_size[-1]
+        # if mask[largest].all():
+        #     mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
+        mask[largest] = True
+        if mask.all():
+            mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
+            mask[smallest], mask[largest] = True, True
+
+        to_donate = donation_candidates(largest,
+                np.ma.masked_array(centers, mask).
+                filled((float("inf"), float("inf"))))
+
+        for _ in range(len(clusters[largest]) - len(clusters[by_size[-2]]) + 2):
+            pt, tar = next(to_donate)
+            clusters[largest].remove(tuple(pt))
+            clusters[tar].add(tuple(pt))
+
+        centers[largest] = np.array(list(clusters[largest])).mean(axis=0)
+
+    return clusters
 
 def find_clusters(pixels, number_of_labels, max_per_cluster=100):
-    idx = Index()
-
-    # Insert all pixels into the rtree
-    for y in range(pixels.shape[0]):
-        for x in range(pixels.shape[1]):
-            idx.insert((x, y, pixels[y][x]), set([(x, y, pixels[y][x])]))
     w, h = pixels.shape
 
-    # left bottom right top
-    bbox = (0, 0, h, w)
+    sample_pop = np.ceil(np.bincount(np.reshape(pixels, -1)) / max_per_cluster).astype(int)
 
-    level, performed_merge = 0, True
-    while performed_merge:
-        performed_merge = False
+    colors = [[] for _ in range(len(sample_pop))]
+    for x in range(w):
+        for y in range(h):
+            colors[pixels[x][y]].append((x, y))
+    colors = [np.array(c) for c in colors]
 
-        # cluster into next level
-        next_tree = Index()
-        num_pixels = np.bincount(pixels.reshape(h*w))
-        for color in range(number_of_labels):
-            # random dist
-            pop = int(math.ceil(1.0*num_pixels[color]/max_per_cluster))
-            for _ in range(pop):
-                objs = idx.points
-                color_map = idx.getpoints(color)
-                if not color_map: continue
-                center = random.sample(color_map, 1)[0]
-                new_cluster = center[1]
-                idx.delete(center[0])
-                for cluster in idx.nearest(center[0], max_per_cluster):
-                    obj = cluster[1]
-                    if len(obj | new_cluster) <= max_per_cluster:
-                        performed_merge = bool(obj - new_cluster)
-                        new_cluster = new_cluster.union(obj)
-                        idx.delete(cluster[0])
+    clusters = [None for _ in range(len(colors))]
+    for c in range(len(colors)):
+        # Run KMeans clustering
+        clt = MiniBatchKMeans(n_clusters=sample_pop[c])
+        clt.fit_predict(colors[c])
+        centers, labels = clt.cluster_centers_, clt.labels_
 
-                # find new center of cluster
-                if new_cluster:
-                    x, y, _ = map(lambda x: sum(x)/len(x), zip(*new_cluster))
-                    next_tree.insert((x, y, color), new_cluster)
+        # Construct clusters
+        clus = [set((x, y) for x, y in colors[c][labels == i]) for i in range(sample_pop[c])]
+        clusters[c] = redistribute_clusters(clus, centers, max_per_cluster)
 
-        assert(len(idx) == 0)
-        idx = next_tree
-        level += 1
-    print([i[1] for i in idx.points])
-    return idx.points
+    return clusters
+
 
 def solve_rounds(pixels, number_of_cans, max_pixels_per_can=100):
-    clusters = find_clusters(pixels, number_of_cans, max_per_cluster=max_pixels_per_can)
-
-def main():
-    parser = argparse.ArgumentParser('venus')
-    parser.add_argument('-i', '--image', type=str)
-    parser.add_argument('-m', '--max-pixels-per-can', type=int, default=100)
-    parser.add_argument('-n', '--number-of-cans', type=int, default=4)
-
-    args = parser.parse_args()
-    sample = [
-        [9, 9, 9, 9, 9, 1, 0, 9],
-        [9, 9, 9, 9, 9, 1, 0, 0],
-        [9, 9, 9, 9, 1, 1, 1, 1],
-        [9, 9, 0, 1, 1, 9, 1, 9],
-        [0, 0, 1, 1, 9, 9, 9, 9],
-        [9, 9, 0, 9, 9, 0, 0, 0],
-        [9, 9, 9, 9, 9, 0, 0, 0],
-        [9, 9, 9, 9, 9, 1, 1, 1]
-    ]
-    cluster_size = 3
-    num_cans = 1
-    solve_rounds(np.array(sample), num_cans, 100, cluster_size)
-
-if __name__ == '__main__':
-    main()
+    return find_clusters(pixels, number_of_cans, max_per_cluster=max_pixels_per_can)
