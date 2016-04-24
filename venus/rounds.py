@@ -20,61 +20,80 @@ from scipy import spatial
 from sklearn.cluster import MiniBatchKMeans
 import pdb
 
-def redistribute_clusters(clusters, centers, cluster_size):
-    odd_size = sum([len(c) for c in clusters]) % cluster_size
 
-    by_size = np.argsort(np.array([len(c) for c in clusters]))
+class Cluster(object):
+    def __init__(self, elems):
+        self._donatable = set(elems)
+        self._frozen = set()
 
-    def donation_candidates(from_idx, centers, count=1):
-        clus = np.array(list(clusters[from_idx]))
+    def __len__(self):
+        return len(self._donatable) + len(self._frozen)
+
+    def donation_candidates(self, centers):
+        clus = np.array(list(self._donatable))
         tree = spatial.KDTree(centers)
         dists, target = tree.query(clus)
         by_dist = np.argsort(dists)
         return zip(clus[by_dist], target[by_dist])
 
+    def remove(self, elem):
+        self._donatable.remove(elem)
+
+    def add(self, elem):
+        self._frozen.add(elem)
+
+    def count_donatable(self):
+        return len(self._donatable)
+
+    def all(self):
+        return np.concatenate((
+                np.array(list(self._donatable)),
+                np.array(list(self._frozen))
+                ))
+
+
+def redistribute_clusters(clusters, centers, cluster_size, max_iterations=1000):
+    clusters = [Cluster(c) for c in clusters]
+    odd_size = sum(map(len, clusters)) % cluster_size
+
+    by_size = np.argsort(np.array([len(c) for c in clusters]))
+    smallest = np.argmin(np.abs(by_size - cluster_size))
+
     # Form the smallest cluster by giving away pixels from it
     mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
-    smallest = by_size[0]
     mask[smallest] = True
     centers = np.ma.masked_array(centers, mask)
-    to_donate = donation_candidates(smallest, centers)
+    to_donate = clusters[smallest].donation_candidates(centers)
+
     for _ in range(len(clusters[smallest]) - odd_size):
         pt, tar = next(to_donate)
         clusters[tar].add(tuple(pt))
         clusters[smallest].remove(tuple(pt))
 
-    # TODO: once a pixel has been donated, never donate it again.
-    # But we have to be very careful not to donate a pixel to a cluster which
-    # already has 100 donated pixels.
-    it = 0
-    mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
-    mask[smallest] = True
-    while not all(len(c) <= cluster_size for c in clusters):
-        by_size = np.argsort(np.array([len(c) for c in clusters]))
+    for it in range(max_iterations):
+        # pdb.set_trace()
+        by_size = np.argsort(np.array([c.count_donatable() for c in clusters]))
 
         print(it, by_size[-1], len(clusters[by_size[-1]]), sep="\t")
-        it += 1
 
         largest = by_size[-1]
-        # if mask[largest].all():
-        #     mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
+        mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
         mask[largest] = True
-        if mask.all():
-            mask = np.zeros(2 * len(centers), dtype=bool).reshape((-1, 2))
-            mask[smallest], mask[largest] = True, True
+        to_donate = clusters[largest].donation_candidates(
+                np.ma.masked_array(centers, mask))
 
-        to_donate = donation_candidates(largest,
-                np.ma.masked_array(centers, mask).
-                filled((float("inf"), float("inf"))))
-
-        for _ in range(len(clusters[largest]) - len(clusters[by_size[-2]]) + 2):
+        targeted = {largest}
+        for _ in range(len(clusters[largest])
+                - clusters[by_size[-2]].count_donatable() + 1):
             pt, tar = next(to_donate)
             clusters[largest].remove(tuple(pt))
             clusters[tar].add(tuple(pt))
+            targeted.add(tar)
 
-        centers[largest] = np.array(list(clusters[largest])).mean(axis=0)
+        for tar in targeted:
+            centers[tar] = clusters[largest].all().mean(axis=0)
 
-    return clusters
+    return [c.all() for c in clusters]
 
 def find_clusters(pixels, number_of_labels, max_per_cluster=100):
     w, h = pixels.shape
